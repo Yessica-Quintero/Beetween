@@ -1,0 +1,92 @@
+// Define SSH Key with permissions to access App Servers, can be added
+// here https://JENKINS_DOMAIN.between.com/credentials/store/system/domain/_/
+app_ssh_key = 'between-key'
+// Define slack channel for notifications
+def slack_channel = '#between'
+
+// Define Servers to deploy
+def server_01 = [:]
+server_01.name = "between-app"
+server_01.host = "10.10.10.153"
+
+python2binary = 'python2'
+def BTW_CREDENTIALS = 'between-api-prod'
+
+python3binary = 'python3'
+def BTW_CREDENTIALS = 'between-api-prod'
+
+
+pipeline {
+    agent any
+    options{
+        timeout(time: 20)
+        disableConcurrentBuilds()
+        buildDiscarder(
+            logRotator(
+                daysToKeepStr: '30',
+                numToKeepStr: '60')
+        )
+    }
+    stages {
+        stage('Notify') {
+            steps {
+                wrap([$class: 'BuildUser']) {
+                    script {
+                        USER_NAME = "${BUILD_USER}"
+                        currentBuild.displayName = "#${BUILD_NUMBER}"
+                    }
+                }
+                slackSend (channel: slack_channel,
+                    message: "Build Started: Job <${env.BUILD_URL}|${env.JOB_NAME} [${env.BUILD_NUMBER}]> by ${USER_NAME}")
+            }
+        }
+        stage('Run script') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: BTW_CREDENTIALS, usernameVariable: 'API_USER', passwordVariable: 'API_PASSWORD')]) {
+                    withCredentials([sshUserPrivateKey(credentialsId: app_ssh_key, usernameVariable: 'SSH_USERNAME', keyFileVariable: 'SSH_KEY')]) {
+                        script {
+                            def remote = [ name: server_01.name, host: server_01.host, user: SSH_USERNAME, identityFile: SSH_KEY, allowAnyHosts: true]
+                            def check_python2 = sshCommand remote: remote, command: "[[ -e '/opt/python2-venv/bin/python' ]] && echo true", failOnError: false
+                            if (check_python2 == 'true') {
+                                python2binary = "/opt/python2-venv/bin/python"
+                                echo "USING NEW PYTHON2 VIRTUALENV"
+                            }
+                            sshCommand remote: remote, command: "make install ."
+                            sshCommand remote: remote, command: "cd /var/www/between && ${python2binary} -m service.process --api_user=${API_USER} --api_password='${API_PASSWORD}'"
+
+                            def check_python3 = sshCommand remote: remote, command: "[[ -e '/opt/python3-venv/bin/python' ]] && echo true", failOnError: false
+                            if (check_python3 == 'true') {
+                                python3binary = "/opt/python3-venv/bin/python"
+                                echo "USING NEW PYTHON3 VIRTUALENV"
+                            }
+                            sshCommand remote: remote, command: "make install ."
+                            sshCommand remote: remote, command: "cd /var/www/between && ${python3binary} -m service.process --api_user=${API_USER} --api_password='${API_PASSWORD}'"
+                        }
+                    }
+                }
+            }
+        }
+        
+    }
+    post {
+        always {
+            emailext (
+                to: "jenkins@between.com",
+                subject: '${DEFAULT_SUBJECT}',
+                body: '${DEFAULT_CONTENT}',
+                attachLog: true,
+                compressLog: false)
+            cleanWs()
+        }
+        success {
+            slackSend (color: "good",
+                channel: slack_channel,
+                message: "SUCCESSFUL: Job <${env.BUILD_URL}|${env.JOB_NAME} [${env.BUILD_NUMBER}]> by ${USER_NAME}")
+        }
+        unsuccessful {
+            slackSend (color: "danger",
+                channel: slack_channel,
+                message: "FAILURE: Job <${env.BUILD_URL}|${env.JOB_NAME} [${env.BUILD_NUMBER}]> by ${USER_NAME}")
+        }
+    }
+}
